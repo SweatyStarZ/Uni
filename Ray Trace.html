@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Ray Tracer</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    canvas {
+      box-shadow: 0 0 20px rgba(0,0,0,0.8);
+    }
+  </style>
+</head>
+<body>
+<canvas id="canvas" width="900" height="500"></canvas>
+
+<script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const width = canvas.width;
+const height = canvas.height;
+
+// Anti-aliasing samples (increase = smoother but slower)
+const SAMPLES = 8;
+
+// -------- Vector helpers --------
+function vec(x, y, z) { return {x, y, z}; }
+
+function add(a, b) { return vec(a.x+b.x, a.y+b.y, a.z+b.z); }
+function sub(a, b) { return vec(a.x-b.x, a.y-b.y, a.z-b.z); }
+function mul(a, s) { return vec(a.x*s, a.y*s, a.z*s); }
+function dot(a, b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+
+function normalize(v) {
+  const len = Math.sqrt(dot(v,v));
+  return mul(v, 1/len);
+}
+
+function reflect(I, N) {
+  return sub(I, mul(N, 2 * dot(I, N)));
+}
+
+// -------- Scene setup --------
+const spheres = [
+  { center: vec(0.5, 0.8, 1.5), radius: 0.4, color: [25, 266, 188], specular: 50 },
+  { center: vec(0.5, 0, 2), radius: 0.8, color: [192, 29, 200], specular: 100 },
+  { center: vec(-1.5, 0, 2), radius: 0.8, color: [13, 235, 17], specular: 10 },
+  { center: vec(0, -5002, 0), radius: 5000, color: [0, 200, 0], specular: 0 }
+];
+
+const light = {
+  position: vec(2, 5, -2),
+  intensity: 1.2
+};
+
+// -------- Ray-sphere intersection --------
+function intersectRaySphere(origin, dir, sphere) {
+  const CO = sub(origin, sphere.center);
+
+  const a = dot(dir, dir);
+  const b = 2 * dot(CO, dir);
+  const c = dot(CO, CO) - sphere.radius * sphere.radius;
+
+  const disc = b*b - 4*a*c;
+  if (disc < 0) return null;
+
+  const t1 = (-b + Math.sqrt(disc)) / (2*a);
+  const t2 = (-b - Math.sqrt(disc)) / (2*a);
+
+  return Math.min(t1, t2);
+}
+
+// -------- Lighting --------
+function computeLighting(point, normal, view, specular) {
+  let intensity = 0.2;
+
+  const L = normalize(sub(light.position, point));
+
+  const shadowHit = closestIntersection(point, L, 0.001, Infinity);
+  if (shadowHit) return intensity;
+
+  const nDotL = dot(normal, L);
+  if (nDotL > 0) {
+    intensity += light.intensity * nDotL;
+  }
+
+  if (specular !== -1) {
+    const R = reflect(L, normal);
+    const rDotV = dot(R, view);
+    if (rDotV > 0) {
+      intensity += light.intensity * Math.pow(rDotV, specular);
+    }
+  }
+
+  return intensity;
+}
+
+// -------- Closest hit --------
+function closestIntersection(origin, dir, tMin, tMax) {
+  let closestT = Infinity;
+  let closestSphere = null;
+
+  for (let sphere of spheres) {
+    const t = intersectRaySphere(origin, dir, sphere);
+    if (t !== null && t >= tMin && t <= tMax && t < closestT) {
+      closestT = t;
+      closestSphere = sphere;
+    }
+  }
+
+  return closestSphere ? { sphere: closestSphere, t: closestT } : null;
+}
+
+// -------- Gradient background --------
+function background(dir) {
+  const t = 0.5 * (dir.y + 1);
+
+  // Horizon blend 
+  const horizon = [255, 200, 150];   
+  const skyTop = [50, 120, 255];     
+  const zenith = [10, 20, 80];       
+
+  // First blend: horizon → sky
+  let col = [
+    horizon[0] * (1 - t) + skyTop[0] * t,
+    horizon[1] * (1 - t) + skyTop[1] * t,
+    horizon[2] * (1 - t) + skyTop[2] * t
+  ];
+
+  // Second blend: darken toward top 
+  const t2 = Math.pow(t, 2);
+  col = [
+    col[0] * (1 - t2) + zenith[0] * t2,
+    col[1] * (1 - t2) + zenith[1] * t2,
+    col[2] * (1 - t2) + zenith[2] * t2
+  ];
+
+  return col;
+}
+
+// -------- Ray trace --------
+function traceRay(origin, dir) {
+  const hit = closestIntersection(origin, dir, 1, Infinity);
+
+  if (!hit) return background(dir);
+
+  const point = add(origin, mul(dir, hit.t));
+  const normal = normalize(sub(point, hit.sphere.center));
+  const view = mul(dir, -1);
+
+  const lighting = computeLighting(point, normal, view, hit.sphere.specular);
+
+  return hit.sphere.color.map(c => c * lighting);
+}
+
+// -------- Render --------
+const image = ctx.createImageData(width, height);
+const camera = vec(0, 0, 0);
+
+for (let x = 0; x < width; x++) {
+  for (let y = 0; y < height; y++) {
+
+    let finalColor = [0, 0, 0];
+
+    // Anti-aliasing loop
+    for (let s = 0; s < SAMPLES; s++) {
+      const rx = Math.random();
+      const ry = Math.random();
+
+      const aspect = width / height;
+      const vx = (2 * (x + rx) / width - 1) * aspect;
+      const vy = 1 - 2 * (y + ry) / height;
+
+      const dir = normalize(vec(vx, vy, 1));
+      const color = traceRay(camera, dir);
+
+      finalColor[0] += color[0];
+      finalColor[1] += color[1];
+      finalColor[2] += color[2];
+    }
+
+    // Average samples
+    finalColor = finalColor.map(c => c / SAMPLES);
+
+    const index = (x + y * width) * 4;
+    image.data[index] = Math.min(255, finalColor[0]);
+    image.data[index+1] = Math.min(255, finalColor[1]);
+    image.data[index+2] = Math.min(255, finalColor[2]);
+    image.data[index+3] = 255;
+  }
+}
+
+ctx.putImageData(image, 0, 0);
+</script>
+</body>
+</html>
